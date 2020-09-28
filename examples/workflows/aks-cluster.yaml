@@ -1,0 +1,115 @@
+## This is a GitHub action which will bootstrap an AKS cluster based on the configuration
+## provided in your repository. It operates in multiple stages (bootstrap → staging → production)
+## and supports namespaced resources.
+##
+## NOTE: You will need to expose an AZURE_CREDENTIALS secret.
+##
+## This action is designed to work in a repository containing a manifests directory with the following
+## structure:
+##
+##  .
+##  └── manifests/
+##      ├── bootstrap/
+##      │   ├── prometheus/
+##      │   │   └── *.yml
+##      │   └── traefik/
+##      │       └── *.yml
+##      ├── staging/
+##      │   ├── app-staging/
+##      │   │   └── *.yml
+##      │   └── app2-staging/
+##      │       └── *.yml
+##      └── production/
+##          ├── app-prod/
+##          │   └── *.yml
+##          └── app2-prod/
+##              └── *.yml
+##
+##  With the exception of the bootstrap phase (which can deploy across namespaces and create cluster-level resources)
+##  the namespace is derived from the directory name (i.e. app-staging, app2-prod etc.). kubectl apply is used to apply
+##  the full contents of each directory in lexicographical order.
+
+name: AKS Cluster
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  # TODO: Update these to match your AKS cluster's details
+  RESOURCE_GROUP: app-common
+  CLUSTER_NAME: k8s-common
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - uses: azure/aks-set-context@v1
+        with:
+          creds: "${{ secrets.AZURE_CREDENTIALS }}"
+          resource-group: "${{ env.RESOURCE_GROUP }}"
+          cluster-name: "${{ env.CLUSTER_NAME }}"
+
+      - name: Bootstrap Cluster
+        shell: pwsh
+        run: |
+          Get-ChildItem ./manifests/bootstrap -Directory | Where-Object {
+            Write-Host "Applying $($_.Name)" -ForegroundColor Blue
+            kubectl apply -f $_.FullName
+            Write-Host "Applied $($_.Name)" -ForegroundColor Green
+          }
+          
+          Write-Host Namespaces
+          kubectl get namespaces
+          Write-Host Custom Resource Definitions
+          kubectl get crds
+  staging:
+    needs: bootstrap
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - uses: azure/aks-set-context@v1
+        with:
+          creds: "${{ secrets.AZURE_CREDENTIALS }}"
+          resource-group: "${{ env.RESOURCE_GROUP }}"
+          cluster-name: "${{ env.CLUSTER_NAME }}"
+
+      - name: Deploy Staging Resources
+        shell: pwsh
+        run: |
+          Get-ChildItem ./manifests/staging -Directory | Where-Object {
+            Write-Host "Applying $($_.Name)" -ForegroundColor Blue
+            kubectl apply -f $_.FullName --namespace $_.Name
+            kubectl get all --namespace $_.Name
+            Write-Host "Applied $($_.Name)" -ForegroundColor Green
+          }
+  production:
+    needs: staging
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - uses: azure/aks-set-context@v1
+        with:
+          creds: "${{ secrets.AZURE_CREDENTIALS }}"
+          resource-group: "${{ env.RESOURCE_GROUP }}"
+          cluster-name: "${{ env.CLUSTER_NAME }}"
+
+      - name: Deploy Production Resources
+        shell: pwsh
+        run: |
+          Get-ChildItem ./manifests/production -Directory | Where-Object {
+            Write-Host "Applying $($_.Name)" -ForegroundColor Blue
+            kubectl apply -f $_.FullName --namespace $_.Name
+            kubectl get all --namespace $_.Name
+            Write-Host "Applied $($_.Name)" -ForegroundColor Green
+          }
